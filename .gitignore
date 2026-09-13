@@ -21,3 +21,4 @@ hack/tools/bin/*
 
 # Ignore vendor/
 vendor
+/scheduler
