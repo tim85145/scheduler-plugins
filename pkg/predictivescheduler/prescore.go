@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
@@ -43,7 +44,7 @@ type PredictiveScheduler struct {
 
 // New 是 Scheduling Framework 用來建立這個 plugin 實例的建構子，
 // 排程器啟動時會呼叫這個函式，把 handle 交給你，之後整個 plugin 生命週期都用同一個 handle。
-func New(_ context.Context, _ interface{}, handle framework.Handle) (framework.Plugin, error) {
+func New(_ context.Context, _ runtime.Object, handle framework.Handle) (framework.Plugin, error) {
 	return &PredictiveScheduler{
 		handle:            handle,
 		targetUtilization: 0.5, // 預設值,待之後排程模擬驗證後再校準

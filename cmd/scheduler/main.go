@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/scheduler-plugins/pkg/noderesources"
 	"sigs.k8s.io/scheduler-plugins/pkg/noderesourcetopology"
 	"sigs.k8s.io/scheduler-plugins/pkg/podstate"
+	"sigs.k8s.io/scheduler-plugins/pkg/predictivescheduler"
 	"sigs.k8s.io/scheduler-plugins/pkg/preemptiontoleration"
 	"sigs.k8s.io/scheduler-plugins/pkg/qos"
 	"sigs.k8s.io/scheduler-plugins/pkg/sysched"
@@ -60,6 +61,7 @@ func main() {
 		app.WithPlugin(lowriskovercommitment.Name, lowriskovercommitment.New),
 		app.WithPlugin(sysched.Name, sysched.New),
 		app.WithPlugin(peaks.Name, peaks.New),
+		app.WithPlugin(predictivescheduler.Name, predictivescheduler.New),
 		// Sample plugins below.
 		// app.WithPlugin(crossnodepreemption.Name, crossnodepreemption.New),
 		app.WithPlugin(podstate.Name, podstate.New),

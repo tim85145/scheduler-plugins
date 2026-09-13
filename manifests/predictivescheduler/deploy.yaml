@@ -1,0 +1,229 @@
+# manifests/predictivescheduler/deploy.yaml
+#
+# 把 PredictiveScheduler 部署成「第二個排程器」，不取代原本的預設排程器。
+# Pod 要靠 spec.schedulerName: scheduler-plugins-scheduler 才會被這個排程器接手，
+# 沒有指定的 Pod，繼續由原本的排程器處理，完全不受影響。
+#
+# 手動把 manifests/install/charts/as-a-second-scheduler 的 Helm 範本，
+# 代入真實值組成的純 YAML，不需要 Helm。只部署排程器本身，不部署 controller
+# (PredictiveScheduler 不需要 controller，那是給需要額外 CRD 的 plugin 用的)。
+#
+# 對照原始範本做的關鍵修改：
+#   - scheduler.image 改成本地建好、已載入 kind 的 image
+#   - plugins.enabled 只留 PredictiveScheduler，拿掉需要額外 CRD 的預設 plugin
+#   - plugins.disabled 整段拿掉(不停用 PrioritySort，因為沒有替代的排隊邏輯)
+#   - namespace 用獨立的 predictive-scheduler-system，方便之後整個清掉
+
+# ========== Namespace ==========
+# 幫這個排程器獨立開一個 namespace，不擠進 kube-system，
+# 之後想整個清掉重來，直接刪這個 namespace 就好，不會動到系統本身的東西。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: predictive-scheduler-system
+
+---
+# ========== ServiceAccount ==========
+# 排程器這個程式要呼叫 K8s API，需要一個「身份」，這裡就是在建立那個身份。
+# 下面的 ClusterRole/ClusterRoleBinding，會把權限授權給這個身份。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scheduler-plugins-scheduler
+  namespace: predictive-scheduler-system
+
+---
+# ========== ClusterRole ==========
+# 定義「這個身份可以做哪些事」：讀 Node、讀/改 Pod、把 Pod 綁定到 Node(排程的
+# 核心動作)、讀寫 leader election 用的 lease 等等。這份權限清單是照抄官方原始
+# 範本的規則，沒有自己增減，避免漏掉哪個權限導致排程器執行到一半才報錯。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: scheduler-plugins-scheduler
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["", "events.k8s.io"]
+  resources: ["events"]
+  verbs: ["create", "patch", "update"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["create"]
+- apiGroups: ["coordination.k8s.io"]
+  resourceNames: ["scheduler-plugins-scheduler"]
+  resources: ["leases"]
+  verbs: ["get", "update"]
+- apiGroups: [""]
+  resources: ["endpoints"]
+  verbs: ["create"]
+- apiGroups: [""]
+  resourceNames: ["scheduler-plugins-scheduler"]
+  resources: ["endpoints"]
+  verbs: ["get", "update"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch", "patch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["delete", "get", "list", "watch", "update"]
+- apiGroups: [""]
+  resources: ["bindings", "pods/binding"]
+  verbs: ["create"]
+- apiGroups: [""]
+  resources: ["pods/status"]
+  verbs: ["patch", "update"]
+- apiGroups: [""]
+  resources: ["replicationcontrollers", "services"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps", "extensions"]
+  resources: ["replicasets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["statefulsets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["policy"]
+  resources: ["poddisruptionbudgets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims", "persistentvolumes"]
+  verbs: ["get", "list", "watch", "patch", "update"]
+- apiGroups: ["authentication.k8s.io"]
+  resources: ["tokenreviews"]
+  verbs: ["create"]
+- apiGroups: ["authorization.k8s.io"]
+  resources: ["subjectaccessreviews"]
+  verbs: ["create"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["csinodes", "storageclasses", "csidrivers", "csistoragecapacities"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["topology.node.k8s.io"]
+  resources: ["noderesourcetopologies"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["scheduling.x-k8s.io"]
+  resources: ["podgroups", "elasticquotas", "podgroups/status", "elasticquotas/status"]
+  verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+# 我們只啟用 PredictiveScheduler，不符合原範本 NetworkOverhead /
+# PreemptionToleration / SySched 的條件，所以那幾段額外權限規則不需要加。
+
+---
+# ========== ClusterRoleBinding ==========
+# 把上面定義的權限(ClusterRole)，真正「綁」到我們的身份(ServiceAccount)上。
+# 定義權限跟綁定權限是兩個分開的步驟，這步才是真正讓身份拿到權限的地方。
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: scheduler-plugins-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: scheduler-plugins-scheduler
+subjects:
+- kind: ServiceAccount
+  name: scheduler-plugins-scheduler
+  namespace: predictive-scheduler-system
+
+---
+# ========== RoleBinding(讀取叢集內建的認證設定) ==========
+# 這個比較特殊，不是我們自己的權限，是讓排程器能讀取 kube-system 裡一份
+# K8s 內建的認證設定(extension-apiserver-authentication)，排程器對外提供
+# /healthz 這類 HTTPS 端點時，需要用到這份設定驗證憑證，是每個排程器元件
+# 通用的標準需求，照抄原始範本即可。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sched-plugins::extension-apiserver-authentication-reader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+- kind: ServiceAccount
+  name: scheduler-plugins-scheduler
+  namespace: predictive-scheduler-system
+
+---
+# ========== ConfigMap(排程器設定檔) ==========
+# 裝著 KubeSchedulerConfiguration，這是排程器啟動時讀取的核心設定：
+# 這個排程器要叫什麼名字(schedulerName，Pod 要用這個名字指定要給誰排程)、
+# 要啟用哪些 plugin。multiPoint.enabled 底下列出 PredictiveScheduler，
+# 排程框架會自動偵測它實作了 PreScore 跟 Score 這兩個 extension point，
+# 自動套用到兩處，不用像早期手動測試那樣分開寫。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scheduler-config
+  namespace: predictive-scheduler-system
+data:
+  scheduler-config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: false
+      resourceNamespace: predictive-scheduler-system
+      resourceName: scheduler-plugins-scheduler
+    profiles:
+    - schedulerName: scheduler-plugins-scheduler
+      plugins:
+        multiPoint:
+          enabled:
+          - name: PredictiveScheduler
+
+---
+# ========== Deployment(真正讓排程器跑起來) ==========
+# 用你 make local-image 建好、已經 kind load 進叢集的 image，啟動一個
+# 跑著排程器程式的 Pod。volumeMounts 把上面的 ConfigMap 掛進容器裡的
+# /etc/kubernetes/scheduler-config.yaml，對應 args 裡 --config 指定的路徑，
+# 排程器啟動時就是讀這個檔案。livenessProbe/readinessProbe 讓 K8s 知道
+# 這個排程器是不是活著、準備好了沒。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    component: scheduler
+  name: scheduler-plugins-scheduler
+  namespace: predictive-scheduler-system
+spec:
+  selector:
+    matchLabels:
+      component: scheduler
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        component: scheduler
+    spec:
+      serviceAccountName: scheduler-plugins-scheduler
+      containers:
+      - command:
+        - /bin/kube-scheduler
+        args:
+        - --config=/etc/kubernetes/scheduler-config.yaml
+        image: localhost:5000/scheduler-plugins/kube-scheduler:v20260913-
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 10259
+            scheme: HTTPS
+          initialDelaySeconds: 15
+        name: scheduler-plugins-scheduler
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 10259
+            scheme: HTTPS
+        securityContext:
+          privileged: false
+        volumeMounts:
+        - name: scheduler-config
+          mountPath: /etc/kubernetes
+          readOnly: true
+      hostNetwork: false
+      hostPID: false
+      volumes:
+      - name: scheduler-config
+        configMap:
+          name: scheduler-config
