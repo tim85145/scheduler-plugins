@@ -180,6 +180,8 @@ func (pl *PredictiveScheduler) Score(
 		// CycleState 裡沒有資料，代表 PreScore 那階段就已經出過問題，
 		// 這裡不讓排程失敗，直接 fallback 回靜態值。
 		cpuFraction, memFraction = staticResourceFraction(pod, nodeInfo)
+		klog.V(4).InfoS("CycleState 讀取預測資料失敗，fallback 回靜態值",
+			"pod", klog.KObj(pod), "node", nodeName, "error", err)
 	} else {
 		workloadIDOrReason, participating := workloadIDFromPod(pod)
 		if !participating {
@@ -191,8 +193,19 @@ func (pl *PredictiveScheduler) Score(
 		} else {
 			entry, ok := GetPrediction(payload, workloadIDOrReason)
 			if ok {
+				// 新增：對稱於上面的 fallback log，讓「真的用上預測值」這件事
+				// 也留下可查證的痕跡，不只是「不參與」那條路徑才看得到 log。
+				klog.V(4).InfoS("採用預測值評分",
+					"pod", klog.KObj(pod), "node", nodeName, "workloadID",
+					workloadIDOrReason, "predictedCPU", entry.PredictedCPU,
+					"predictedMemory", entry.PredictedMemory)
+
 				cpuFraction, memFraction = predictedResourceFraction(entry, nodeInfo)
 			} else {
+				klog.V(4).InfoS("查無可信預測值,fallback 回靜態值",
+					"pod", klog.KObj(pod), "node", nodeName, "workloadID",
+					workloadIDOrReason)
+
 				// enabled=false、查無此 workload、或資料太舊,都會讓 ok 是 false,
 				// 三種情況統一 fallback 回靜態值,不特別區分處理。
 				cpuFraction, memFraction = staticResourceFraction(pod, nodeInfo)
@@ -210,5 +223,17 @@ func (pl *PredictiveScheduler) Score(
 	// 之後如果想讓其中一種資源的影響力更大,這裡可以改成加權平均。
 	finalScore := (cpuScore + memScore) / 2
 
+	// 新增：記錄這個 Node 最後拿到的分數，供實機驗證時 grep
+	klog.V(4).InfoS("評分結果", "pod", klog.KObj(pod), "node", nodeName,
+		"cpuScore", cpuScore, "memScore", memScore, "finalScore", finalScore)
+
 	return int64(finalScore), nil
+}
+
+// ScoreExtensions 是 framework.ScorePlugin 介面要求的第二個方法。
+// 這個 plugin 不需要對所有 Node 的分數做事後正規化，所以直接回傳 nil。
+// 少了這個方法，PredictiveScheduler 就不算實作了 ScorePlugin 介面，
+// 排程框架用 multiPoint 啟用 plugin 時，會悄悄略過 Score()，不報任何錯誤。
+func (pl *PredictiveScheduler) ScoreExtensions() framework.ScoreExtensions {
+	return nil
 }

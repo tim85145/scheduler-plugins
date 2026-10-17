@@ -21,6 +21,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
@@ -41,6 +42,11 @@ type PredictiveScheduler struct {
 	handle            framework.Handle
 	targetUtilization float64
 }
+
+// 編譯期介面檢查：如果 PredictiveScheduler 少實作了任何一個介面要求的方法，
+// 這兩行會讓 go build 直接報錯，不用等到部署後才發現「怎麼 Score 都沒被呼叫」。
+var _ framework.PreScorePlugin = &PredictiveScheduler{}
+var _ framework.ScorePlugin = &PredictiveScheduler{}
 
 // New 是 Scheduling Framework 用來建立這個 plugin 實例的建構子，
 // 排程器啟動時會呼叫這個函式，把 handle 交給你，之後整個 plugin 生命週期都用同一個 handle。
@@ -74,14 +80,16 @@ func (d *predictionStateData) Clone() framework.StateData {
 // 每一輪排程只會被呼叫一次，在這裡把 loadPredictions() 撈到的資料，
 // 寫進 CycleState，供接下來的 Score 階段(針對每個候選 Node 各別呼叫)取用。
 func (pl *PredictiveScheduler) PreScore(
-	ctx context.Context,
+	_ context.Context,
 	state *framework.CycleState,
 	pod *v1.Pod,
-	nodes []*v1.Node,
+	_ []*framework.NodeInfo,
 ) *framework.Status {
 	payload, err := loadPredictions(pl.handle)
 	if err != nil {
-		return framework.AsStatus(fmt.Errorf("PreScore 載入預測資料失敗: %w", err))
+		// 載入失敗不中斷排程：不寫 CycleState，Score() 會自然 fallback 回靜態值
+		klog.ErrorS(err, "載入預測資料失敗，本輪排程退回靜態值", "pod", klog.KObj(pod))
+		return nil
 	}
 
 	state.Write(predictionStateKey, &predictionStateData{payload: payload})
