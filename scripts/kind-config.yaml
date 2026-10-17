@@ -1,3 +1,6 @@
+# 建立實驗叢集：kind create cluster --name research-cluster --config scripts/kind-config.yaml
+# 版本：kind v0.33.0-alpha，Kubernetes server v1.36.1
+# control-plane 預設帶 NoSchedule taint，所以 Pod 只會被排到三個 worker
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
