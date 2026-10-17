@@ -115,10 +115,44 @@ kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: scheduler-plugins-scheduler
-roleRef:
+roleRef:  # 綁定規則(指向上面 ClusterRole 定義的規則)
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: scheduler-plugins-scheduler
+subjects: # 綁定對象(指向上面 ServiceAccount 定義的身份)
+- kind: ServiceAccount
+  name: scheduler-plugins-scheduler
+  namespace: predictive-scheduler-system
+
+---
+# ========== Role(讀取 kube-system 裡的預測資料 ConfigMap) ==========
+# load_predictions.go 的 loadPredictions() 需要讀取 kube-system 裡
+# 那份 resource-predictions ConfigMap，這個權限原本的 ClusterRole 完全沒有涵蓋
+# (整份 rules 清單裡找不到 "configmaps" 這個 resource)，是審查過程中發現的漏洞。
+# 用限定在 kube-system 的 Role，而不是直接改 ClusterRole，是為了不讓權限範圍
+# 擴大到「整個叢集、所有 namespace 的 ConfigMap」，符合最小權限原則——
+# 排程器實際只需要讀這一個 namespace 裡的東西。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: predictive-scheduler-configmap-reader
+  namespace: kube-system
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch"]
+
+---
+# ========== RoleBinding(把上面的 Role 綁給排程器身分) ==========
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: predictive-scheduler-configmap-reader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: predictive-scheduler-configmap-reader
 subjects:
 - kind: ServiceAccount
   name: scheduler-plugins-scheduler
@@ -201,7 +235,8 @@ spec:
         - /bin/kube-scheduler
         args:
         - --config=/etc/kubernetes/scheduler-config.yaml
-        image: localhost:5000/scheduler-plugins/kube-scheduler:v20260913-
+        - --v=4
+        image: localhost:5000/scheduler-plugins/kube-scheduler:v20261009-
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
