@@ -1,0 +1,23 @@
+# test-pod.yaml
+#
+# 測試用 Pod：故意貼上 opt-in 門檻標籤，但 app 這個 label 的值
+# 在 ConfigMap 裡沒有對應的預測資料，用來驗證 fallback 路徑正常運作——
+# GetPrediction() 應該回傳 false，Score() 改用 staticResourceFraction()，
+# 排程器仍然要能正常把這個 Pod 排到某台 Node 上，不會卡住或報錯。
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-fallback-pod
+  labels:
+    app: test-fallback-pod       # ConfigMap 裡不會有這個名字，預期走 fallback
+    predictive-scheduler.io/enabled: "true"
+spec:
+  schedulerName: scheduler-plugins-scheduler   # 指定給我們的排程器處理
+  containers:
+  - name: pause
+    image: registry.k8s.io/pause:3.9
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "64Mi"

@@ -1,0 +1,21 @@
+# test-prediction-pod.yaml
+#
+# 測試用 Pod：app label 對應 write_test_prediction.py 寫進 ConfigMap
+# 的那筆真實資料，用來驗證預測值真的會被排程器採用，不是永遠走 fallback。
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-prediction-pod
+  labels:
+    app: test-prediction-pod
+    predictive-scheduler.io/enabled: "true"
+spec:
+  schedulerName: scheduler-plugins-scheduler
+  containers:
+  - name: pause
+    image: registry.k8s.io/pause:3.9
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "64Mi"
